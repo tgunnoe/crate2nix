@@ -718,6 +718,11 @@ struct ResolvedDependencies<'a> {
     package: &'a Package,
     /// Packages references in the NodeDeps of this package.
     resolved_packages_by_crate_name: HashMap<String, Vec<&'a Package>>,
+    /// Direct mapping from node dep name to resolved packageId.
+    /// The node dep name is the rename target (e.g., "mn-ledger-8") when a
+    /// dependency is renamed, or the package name otherwise.
+    /// This allows direct packageId lookup when source-based disambiguation fails.
+    node_dep_pkg_by_name: HashMap<String, PackageId>,
 }
 
 impl<'a> ResolvedDependencies<'a> {
@@ -734,6 +739,7 @@ impl<'a> ResolvedDependencies<'a> {
         })?;
 
         let mut resolved_packages_by_crate_name: HashMap<String, Vec<&'a Package>> = HashMap::new();
+        let mut node_dep_pkg_by_name: HashMap<String, PackageId> = HashMap::new();
         for node_dep in &node.deps {
             let package = metadata.pkgs_by_id.get(&node_dep.pkg).ok_or_else(|| {
                 format_err!(
@@ -748,10 +754,17 @@ impl<'a> ResolvedDependencies<'a> {
                 .entry(normalize_package_name(&package.name))
                 .or_default();
             packages.push(package);
+            // Store the direct mapping from node dep name to its resolved packageId.
+            // node_dep.name is the rename target when renamed, or the package name otherwise.
+            node_dep_pkg_by_name.insert(
+                normalize_package_name(&node_dep.name),
+                node_dep.pkg.clone(),
+            );
         }
         Ok(ResolvedDependencies {
             package,
             resolved_packages_by_crate_name,
+            node_dep_pkg_by_name,
         })
     }
 
@@ -762,6 +775,7 @@ impl<'a> ResolvedDependencies<'a> {
         let ResolvedDependencies {
             package,
             resolved_packages_by_crate_name,
+            node_dep_pkg_by_name,
         } = self;
 
         let mut resolved = package
@@ -770,6 +784,35 @@ impl<'a> ResolvedDependencies<'a> {
             .filter(|package_dep| filter(package_dep))
             .flat_map(|package_dep| {
                 let name: String = normalize_package_name(&package_dep.name);
+
+                // For renamed dependencies, try direct lookup via the resolve graph first.
+                // The node_dep_pkg_by_name maps the rename target (or package name) directly
+                // to the correct packageId from cargo's resolution, avoiding ambiguity when
+                // multiple git sources provide the same crate name.
+                let rename_name = package_dep.rename.as_ref()
+                    .map(|r| normalize_package_name(r));
+                let direct_pkg_id = rename_name.as_ref()
+                    .and_then(|rn| node_dep_pkg_by_name.get(rn));
+
+                // If we have a direct packageId from the resolve graph, use it
+                if let Some(pkg_id) = direct_pkg_id {
+                    let dep_package = resolved_packages_by_crate_name
+                        .get(&name)
+                        .and_then(|packages| packages.iter().find(|p| p.id == *pkg_id));
+                    if let Some(dep_package) = dep_package {
+                        return Some(ResolvedDependency {
+                            name: package_dep.name.clone(),
+                            rename: package_dep.rename.clone(),
+                            package_id: dep_package.id.clone(),
+                            target: package_dep.target.clone(),
+                            optional: package_dep.optional,
+                            uses_default_features: package_dep.uses_default_features,
+                            features: package_dep.features.clone(),
+                        });
+                    }
+                }
+
+                // Fall back to traditional resolution
                 let resolved = resolved_packages_by_crate_name
                     .get(&name)
                     .and_then(|packages| {
@@ -814,6 +857,21 @@ impl<'a> ResolvedDependencies<'a> {
                                         .unwrap_or(false)
                                 })
                                 .collect()
+                        } else {
+                            matches
+                        };
+
+                        // If source matching still leaves multiple candidates, try using
+                        // the resolve graph's direct mapping for non-renamed deps too.
+                        let matches = if matches.len() > 1 {
+                            if let Some(pkg_id) = node_dep_pkg_by_name.get(&name) {
+                                matches
+                                    .into_iter()
+                                    .filter(|p| p.id == *pkg_id)
+                                    .collect()
+                            } else {
+                                matches
+                            }
                         } else {
                             matches
                         };

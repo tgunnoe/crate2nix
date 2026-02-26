@@ -410,6 +410,7 @@ rec {
                   in
                   {
                     inherit (dep) rename;
+                    inherit (dep) packageId;
                     inherit (package) version;
                   };
               in
@@ -418,6 +419,10 @@ rec {
           buildRustCrateForPkgsFunc pkgs (
             crateConfig
             // {
+              # Pass packageId through so buildRustCrate can use it for
+              # metadata hashing to disambiguate same-name crates from
+              # different sources.
+              inherit packageId;
               src =
                 crateConfig.src or (fetchurl rec {
                   name = "${crateConfig.crateName}-${crateConfig.version}.tar.gz";
