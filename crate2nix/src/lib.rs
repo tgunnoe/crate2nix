@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::metadata::IndexedMetadata;
+use serde_json;
 use crate::resolve::{CrateDerivation, ResolvedSource};
 use itertools::Itertools;
 use resolve::CratesIoSource;
@@ -164,19 +165,32 @@ impl BuildInfo {
     }
 }
 
-/// Call `cargo metadata` and return result.
+/// Call `cargo metadata` and return result, or load from a pre-generated JSON file.
 fn cargo_metadata(config: &GenerateConfig, cargo_toml: &Path) -> Result<Metadata, Error> {
-    let mut cmd = cargo_metadata::MetadataCommand::new();
-    let mut other_options = config.other_metadata_options.clone();
-    other_options.push("--locked".into());
-    cmd.manifest_path(cargo_toml).other_options(&*other_options);
-    cmd.exec().map_err(|e| {
-        format_err!(
-            "while retrieving metadata about {}: {}",
-            &cargo_toml.to_string_lossy(),
-            e
-        )
-    })
+    if let Some(metadata_path) = &config.metadata_json {
+        let json = std::fs::read_to_string(metadata_path).map_err(|e| {
+            format_err!(
+                "while reading metadata JSON from {}: {}",
+                metadata_path.to_string_lossy(),
+                e
+            )
+        })?;
+        serde_json::from_str(&json).map_err(|e| {
+            format_err!("while parsing metadata JSON: {}", e)
+        })
+    } else {
+        let mut cmd = cargo_metadata::MetadataCommand::new();
+        let mut other_options = config.other_metadata_options.clone();
+        other_options.push("--locked".into());
+        cmd.manifest_path(cargo_toml).other_options(&*other_options);
+        cmd.exec().map_err(|e| {
+            format_err!(
+                "while retrieving metadata about {}: {}",
+                &cargo_toml.to_string_lossy(),
+                e
+            )
+        })
+    }
 }
 
 /// Prefetch hashes when necessary.
@@ -324,4 +338,8 @@ pub struct GenerateConfig {
     pub other_metadata_options: Vec<String>,
     /// Whether to read a `crate-hashes.json` file.
     pub read_crate_hashes: bool,
+    /// Optional path to a pre-generated `cargo metadata` JSON file.
+    /// If provided, cargo metadata will not be executed.
+    #[serde(default)]
+    pub metadata_json: Option<PathBuf>,
 }

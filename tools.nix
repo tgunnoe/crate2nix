@@ -33,6 +33,10 @@ rec {
     , additionalCrateHashes ? internal.parseOptHashesFile
         (src + "/crate-hashes.json")
     , cargo ? pkgs.cargo
+    , # Pre-generated cargo metadata JSON file. If provided, crate2nix
+      # will use it instead of running `cargo metadata`, allowing pure
+      # sandboxed builds without network access for git dependencies.
+      cargoMetadataJson ? null
     }:
     let
       crateDir = dirOf (src + "/${cargoToml}");
@@ -54,13 +58,13 @@ rec {
       buildPhase = ''
         set -e
 
-        mkdir -p "$out/cargo"
+        export CARGO_HOME="$(mktemp -d)"
+        export HOME="$(mktemp -d)"
 
-        export CARGO_HOME="$out/cargo"
-        export HOME="$out"
+        mkdir -p "$CARGO_HOME"
+        cp ${vendor.cargoConfig} "$CARGO_HOME/config.toml"
 
-        cp ${vendor.cargoConfig} $out/cargo/config
-
+        mkdir -p "$out"
         crate_hashes="$out/crate-hashes.json"
         echo -n '${builtins.toJSON vendor.extendedHashes}' | jq > "$crate_hashes"
         # Remove last trailing newline, which crate2nix doesn't (yet) include
@@ -70,6 +74,10 @@ rec {
         if [ -r ./${cargoToml} ]; then
           crate2nix_options+=" -f ./${cargoToml}"
         fi
+
+        ${lib.optionalString (cargoMetadataJson != null) ''
+          crate2nix_options+=" --metadata-json ${cargoMetadataJson}"
+        ''}
 
         if test -r "./crate2nix.json" ; then
           cp "./crate2nix.json" "$out/crate2nix.json"
@@ -90,7 +98,7 @@ rec {
           { set +x; } 2>/dev/null
           echo "crate2nix failed." >&2
           echo "== cargo/config (BEGIN)" >&2
-          sed 's/^/    /' $out/cargo/config >&2
+          sed 's/^/    /' "$CARGO_HOME/config.toml" >&2
           echo ""
           echo "== cargo/config (END)" >&2
             echo ""
@@ -372,6 +380,7 @@ rec {
               [source.vendored-sources]
               directory = "${vendoredSources}"
             '';
+
 
         # Fetchers by source type that can fetch the package source.
         fetchers = {

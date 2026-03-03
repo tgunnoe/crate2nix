@@ -114,13 +114,10 @@ impl CrateDerivation {
             ResolvedSource::new(config, package, package_path)?
         };
 
-        let package_path = package_path.canonicalize().map_err(|e| {
-            format_err!(
-                "while canonicalizing crate path path {}: {}",
-                package_path.as_str(),
-                e
-            )
-        })?;
+        // Canonicalize the path if it exists on disk. For sandboxed builds
+        // using --metadata-json, non-local crate paths (crates.io, git) won't
+        // exist and that's fine — their source is fetched separately.
+        let package_path = package_path.canonicalize().unwrap_or_else(|_| package_path.into());
 
         let lib = package
             .targets
@@ -345,13 +342,15 @@ pub struct BuildTarget {
 
 impl BuildTarget {
     pub fn new(target: &Target, package_path: impl AsRef<Path>) -> Result<BuildTarget, Error> {
+        let canonical_src = target.src_path.canonicalize()
+            .unwrap_or_else(|_| target.src_path.clone().into());
+        let package_path = package_path.as_ref();
+        let src_path = canonical_src.strip_prefix(package_path)
+            .unwrap_or(&canonical_src)
+            .to_path_buf();
         Ok(BuildTarget {
             name: target.name.clone(),
-            src_path: target
-                .src_path
-                .canonicalize()?
-                .strip_prefix(&package_path)?
-                .to_path_buf(),
+            src_path,
             required_features: target.required_features.clone(),
         })
     }

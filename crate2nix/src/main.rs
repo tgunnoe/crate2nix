@@ -120,6 +120,15 @@ pub enum Opt {
                     If there are any prefetches, their hashes will still be written into crate-hashes.json."
         )]
         dont_read_crate_hashes: bool,
+
+        #[structopt(
+            long = "metadata-json",
+            parse(from_os_str),
+            help = "Path to a pre-generated cargo metadata JSON file. \
+                    If provided, cargo metadata will not be executed, allowing \
+                    generation in sandboxed environments without network access."
+        )]
+        metadata_json: Option<PathBuf>,
     },
 
     #[structopt(name = "source", about = "Manage out of tree sources for crate2nix.")]
@@ -380,6 +389,7 @@ fn main() -> anyhow::Result<()> {
             features,
             no_cargo_lock_checksums,
             dont_read_crate_hashes,
+            metadata_json,
         } => {
             let config = crate2nix::config::Config::read_from_or_default(&crate2nix_json)?;
 
@@ -467,6 +477,7 @@ fn main() -> anyhow::Result<()> {
                 other_metadata_options: feature_metadata_options()?,
                 use_cargo_lock_checksums: !no_cargo_lock_checksums,
                 read_crate_hashes: !dont_read_crate_hashes,
+                metadata_json,
             };
             let build_info = crate2nix::BuildInfo::for_config(&generate_info, &generate_config)?;
             render::CARGO_NIX.write_to_file(&output, &build_info)?;
