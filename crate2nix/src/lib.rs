@@ -175,9 +175,34 @@ fn cargo_metadata(config: &GenerateConfig, cargo_toml: &Path) -> Result<Metadata
                 e
             )
         })?;
-        serde_json::from_str(&json).map_err(|e| {
+        let mut metadata: Metadata = serde_json::from_str(&json).map_err(|e| {
             format_err!("while parsing metadata JSON: {}", e)
-        })
+        })?;
+
+        // Rewrite absolute paths from the original machine to be relative to
+        // the current working directory. The metadata JSON contains paths like
+        // /home/user/project/node/Cargo.toml — we need them relative to CWD.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let old_root = metadata.workspace_root.clone().into_std_path_buf();
+        for package in &mut metadata.packages {
+            if let Ok(rel) = package.manifest_path.strip_prefix(&old_root) {
+                package.manifest_path = cargo_metadata::camino::Utf8PathBuf::from(
+                    cwd.join(rel).to_string_lossy().to_string()
+                );
+            }
+            for target in &mut package.targets {
+                if let Ok(rel) = target.src_path.strip_prefix(&old_root) {
+                    target.src_path = cargo_metadata::camino::Utf8PathBuf::from(
+                        cwd.join(rel).to_string_lossy().to_string()
+                    );
+                }
+            }
+        }
+        metadata.workspace_root = cargo_metadata::camino::Utf8PathBuf::from(
+            cwd.to_string_lossy().to_string()
+        );
+
+        Ok(metadata)
     } else {
         let mut cmd = cargo_metadata::MetadataCommand::new();
         let mut other_options = config.other_metadata_options.clone();

@@ -545,81 +545,44 @@ impl ResolvedSource {
         config: &GenerateConfig,
         package_path: impl AsRef<Path>,
     ) -> Result<PathBuf, Error> {
-        // When using --metadata-json, local crate paths from the JSON are absolute
-        // paths on the user's machine. Compute them relative to the Cargo.toml
-        // directory (workspace root) and then make them relative to the output dir.
-        let base_directory = if config.metadata_json.is_some() {
-            // Use the Cargo.toml's parent as the workspace root
-            config
-                .cargo_toml
-                .first()
-                .and_then(|p| p.parent())
-                .map(|p| {
-                    if p.is_relative() {
-                        std::env::current_dir().unwrap_or_default().join(p)
-                    } else {
-                        p.to_path_buf()
-                    }
-                })
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
-        } else {
-            let mut output_build_file_directory = config
-                .output
-                .parent()
-                .ok_or_else(|| {
-                    format_err!(
-                        "could not get parent of output file '{}'.",
-                        config.output.to_string_lossy()
-                    )
-                })?
-                .to_path_buf();
+        // Use local directory. This is the local cargo crate directory in the worst case.
 
-            if output_build_file_directory.is_relative() {
-                output_build_file_directory = Path::new(".").join(output_build_file_directory);
-            }
-
-            output_build_file_directory.canonicalize().map_err(|e| {
-                format_err!(
-                    "could not canonicalize output file directory '{}': {}",
-                    output_build_file_directory.to_string_lossy(),
-                    e
-                )
-            })?
-        };
-
-        let output_build_file_directory = config
+        let mut output_build_file_directory = config
             .output
             .parent()
-            .map(|p| {
-                if p.as_os_str().is_empty() {
-                    Path::new(".").to_path_buf()
-                } else if p.is_relative() {
-                    Path::new(".").join(p)
-                } else {
-                    p.to_path_buf()
-                }
-            })
-            .and_then(|p| p.canonicalize().ok())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            .ok_or_else(|| {
+                format_err!(
+                    "could not get parent of output file '{}'.",
+                    config.output.to_string_lossy()
+                )
+            })?
+            .to_path_buf();
 
-        // Compute the crate's path relative to the workspace root
-        let relative_to_workspace = diff_paths(package_path.as_ref(), &base_directory)
-            .unwrap_or_else(|| package_path.as_ref().to_path_buf());
+        if output_build_file_directory.is_relative() {
+            // Deal with "empty" path. E.g. the parent of "Cargo.nix" is "".
+            output_build_file_directory = Path::new(".").join(output_build_file_directory);
+        }
 
-        // Then make it relative to the output directory
-        let workspace_from_output = diff_paths(&base_directory, &output_build_file_directory)
-            .unwrap_or_else(|| base_directory.clone());
+        output_build_file_directory = output_build_file_directory.canonicalize().map_err(|e| {
+            format_err!(
+                "could not canonicalize output file directory '{}': {}",
+                output_build_file_directory.to_string_lossy(),
+                e
+            )
+        })?;
 
-        let path = workspace_from_output.join(&relative_to_workspace);
-
-        Ok(if path == PathBuf::from("") || path == PathBuf::from(".") {
+        Ok(if package_path.as_ref() == output_build_file_directory {
             "./.".into()
-        } else if path == PathBuf::from("../") {
-            path.join(PathBuf::from("."))
-        } else if path.starts_with("../") {
-            path
         } else {
-            PathBuf::from("./").join(path)
+            let path = diff_paths(package_path.as_ref(), &output_build_file_directory)
+                .unwrap_or_else(|| package_path.as_ref().to_path_buf());
+            if path == PathBuf::from("../") {
+                path.join(PathBuf::from("."))
+            } else if path.starts_with("../") {
+                path
+            } else {
+                PathBuf::from("./").join(path)
+            }
         })
     }
 
