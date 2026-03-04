@@ -28,6 +28,15 @@
 , extraTargetFlags ? {}
   # Whether to perform release builds: longer compile times, faster binaries.
 , release ? true
+  # Crate names that should always be compiled for the build (host) platform,
+  # even when they appear as dependencies of target-platform crates.
+  # Needed for cross-compilation where proc-macro helper libraries require
+  # std which isn't available on bare-metal targets like wasm32v1-none.
+, hostPlatformCrates ? [ ]
+  # Feature names to strip from all crates before dependency resolution.
+  # Only applied to cross-compilation targets (not native builds).
+  # Controls which optional dependencies are activated.
+, stripFeatures ? [ ]
   # Additional crate2nix configuration if it exists.
 , crateConfig
   ? if builtins.pathExists ./crate-config.nix

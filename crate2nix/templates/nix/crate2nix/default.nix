@@ -17,6 +17,18 @@
 , targetFeatures ? [ ]
 , extraTargetFlags ? { }
 , release ? true
+  # Crate names that should always be compiled for the build (host) platform,
+  # even when they appear as dependencies of target-platform crates.
+  # This is needed for cross-compilation where proc-macro helper libraries
+  # (like proc-macro2, syn, quote) are routed to the target platform by
+  # crate2nix but can only compile on the host (e.g., they require std
+  # which isn't available on bare-metal targets like wasm32v1-none).
+, hostPlatformCrates ? [ ]
+  # Feature names to strip from all crates before dependency resolution.
+  # Controls which optional dependencies are activated. Useful for
+  # cross-compilation where the full workspace resolves features (like "std")
+  # that shouldn't be active for the target platform.
+, stripFeatures ? [ ]
 ,
 }:
 rec {
@@ -351,7 +363,12 @@ rec {
         buildByPackageIdForPkgsImpl =
           self: pkgs: packageId:
           let
-            features = mergedFeatures."${packageId}" or [ ];
+            rawFeatures = mergedFeatures."${packageId}" or [ ];
+            # Only strip features for cross-compilation targets, not native builds
+            isCrossTarget = pkgs.stdenv.hostPlatform != pkgs.stdenv.buildPlatform;
+            features = if isCrossTarget && stripFeatures != [ ]
+              then builtins.filter (f: !(builtins.elem f stripFeatures)) rawFeatures
+              else rawFeatures;
             crateConfig' = crateConfigs."${packageId}";
             crateConfig = builtins.removeAttrs crateConfig' [
               "resolvedDefaultFeatures"
@@ -360,13 +377,18 @@ rec {
             devDependencies = lib.optionals (runTests && packageId == rootPackageId) (
               crateConfig'.devDependencies or [ ]
             );
+            isHostPlatformCrate = depPackageId:
+              (crateConfigs.${depPackageId}.procMacro or false)
+              || builtins.elem (crateConfigs.${depPackageId}.crateName or depPackageId) hostPlatformCrates;
             dependencies = dependencyDerivations {
               inherit features;
               inherit (self) target;
               buildByPackageId =
                 depPackageId:
-                # proc_macro crates must be compiled for the build architecture
-                if crateConfigs.${depPackageId}.procMacro or false then
+                # proc_macro crates and hostPlatformCrates must be compiled for
+                # the build architecture (they may require std or proc_macro
+                # which aren't available on bare-metal cross targets).
+                if isHostPlatformCrate depPackageId then
                   self.build.crates.${depPackageId}
                 else
                   self.crates.${depPackageId};
