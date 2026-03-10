@@ -563,13 +563,11 @@ impl ResolvedSource {
             output_build_file_directory = Path::new(".").join(output_build_file_directory);
         }
 
-        output_build_file_directory = output_build_file_directory.canonicalize().map_err(|e| {
-            format_err!(
-                "could not canonicalize output file directory '{}': {}",
-                output_build_file_directory.to_string_lossy(),
-                e
-            )
-        })?;
+        // When using --metadata-json, paths may not exist on disk (sandbox).
+        // Fall back to the un-canonicalized path if canonicalize fails.
+        output_build_file_directory = output_build_file_directory
+            .canonicalize()
+            .unwrap_or(output_build_file_directory);
 
         Ok(if package_path.as_ref() == output_build_file_directory {
             "./.".into()
