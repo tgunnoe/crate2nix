@@ -128,7 +128,7 @@ rec {
         links = {{crate.links}};
         {%- endif %}
 
-        {%- if crate.binaries|length > 0 and not crate.is_root_or_workspace_member %}
+        {%- if not crate.is_root_or_workspace_member %}
         crateBin = [];
         {%- elif crate.binaries|length > 0 and crate.is_root_or_workspace_member %}
         crateBin = [
@@ -173,6 +173,7 @@ rec {
         src = pkgs.fetchgit {
           url = {{crate.source.Git.url}};
           rev = {{crate.source.Git.rev}};
+          fetchSubmodules = false;
           {%- if crate.source.Git.sha256 %}
           sha256 = {{ crate.source.Git.sha256 }};
           {%- endif %}

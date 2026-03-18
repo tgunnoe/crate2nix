@@ -129,6 +129,30 @@ pub enum Opt {
                     generation in sandboxed environments without network access."
         )]
         metadata_json: Option<PathBuf>,
+
+        #[structopt(
+            long = "from-lockfile",
+            parse(from_os_str),
+            help = "Build metadata from Cargo.lock instead of calling cargo metadata. \
+                    Requires no cargo binary or network access. Use with --git-source \
+                    to provide pre-fetched git dependency sources."
+        )]
+        from_lockfile: Option<PathBuf>,
+
+        #[structopt(
+            long = "git-source",
+            help = "Git source mapping for --from-lockfile mode. Format: 'url#rev=local_path'. \
+                    Can be specified multiple times for each git dependency."
+        )]
+        git_source: Vec<String>,
+
+        #[structopt(
+            long = "crates-io-manifests",
+            parse(from_os_str),
+            help = "Path to directory with extracted crates.io Cargo.toml manifests \
+                    for --from-lockfile mode. Structure: dir/name/version/Cargo.toml"
+        )]
+        crates_io_manifests: Option<PathBuf>,
     },
 
     #[structopt(name = "source", about = "Manage out of tree sources for crate2nix.")]
@@ -144,6 +168,26 @@ pub enum Opt {
 
         #[structopt(subcommand)]
         command: SourceCommands,
+    },
+
+    #[structopt(
+        name = "setup-cargo-git-cache",
+        about = "Set up a cargo git cache from pre-fetched sources. \
+                 Takes mappings of git_url#rev=local_path and creates the \
+                 cargo git cache structure at CARGO_HOME."
+    )]
+    SetupCargoGitCache {
+        #[structopt(
+            long = "cargo-home",
+            parse(from_os_str),
+            help = "The CARGO_HOME directory to set up the git cache in.",
+            default_value = ".cargo"
+        )]
+        cargo_home: PathBuf,
+
+        #[structopt(help = "Mappings in the form 'git_url#rev=local_path'. \
+                    The git URL should include any query params (e.g., ?tag=v1.0).")]
+        mappings: Vec<String>,
     },
 
     #[structopt(
@@ -390,6 +434,9 @@ fn main() -> anyhow::Result<()> {
             no_cargo_lock_checksums,
             dont_read_crate_hashes,
             metadata_json,
+            from_lockfile,
+            git_source,
+            crates_io_manifests,
         } => {
             let config = crate2nix::config::Config::read_from_or_default(&crate2nix_json)?;
 
@@ -478,9 +525,18 @@ fn main() -> anyhow::Result<()> {
                 use_cargo_lock_checksums: !no_cargo_lock_checksums,
                 read_crate_hashes: !dont_read_crate_hashes,
                 metadata_json,
+                from_lockfile,
+                git_sources: git_source,
+                crates_io_manifests,
             };
             let build_info = crate2nix::BuildInfo::for_config(&generate_info, &generate_config)?;
             render::CARGO_NIX.write_to_file(&output, &build_info)?;
+        }
+        Opt::SetupCargoGitCache {
+            cargo_home,
+            mappings,
+        } => {
+            setup_cargo_git_cache(&cargo_home, &mappings)?;
         }
         Opt::Completions { shell, output } => {
             let shell = FromStr::from_str(&shell).map_err(|s| format_err!("{}", s))?;
@@ -492,6 +548,184 @@ fn main() -> anyhow::Result<()> {
         } => {
             command.execute(&crate2nix_json)?;
         }
+    }
+
+    Ok(())
+}
+
+/// Set up a cargo git cache from pre-fetched sources.
+/// Computes cargo's internal directory names (using SipHash) and creates
+/// the proper checkout structure so `cargo metadata --frozen` works offline.
+fn setup_cargo_git_cache(cargo_home: &Path, mappings: &[String]) -> anyhow::Result<()> {
+    #[allow(deprecated)]
+    use std::hash::SipHasher;
+    use std::hash::{Hash, Hasher};
+
+    let db_dir = cargo_home.join("git").join("db");
+    let checkouts_dir = cargo_home.join("git").join("checkouts");
+    std::fs::create_dir_all(&db_dir)?;
+    std::fs::create_dir_all(&checkouts_dir)?;
+
+    for mapping in mappings {
+        // Parse "url#rev=path" — split on last '=' since URLs may contain '='
+        let last_eq = mapping
+            .rfind('=')
+            .ok_or_else(|| format_err!("Invalid mapping '{}': expected 'url#rev=path'", mapping))?;
+        let (url_rev, local_path) = (&mapping[..last_eq], &mapping[last_eq + 1..]);
+        let (url_str, rev) = url_rev
+            .rsplit_once('#')
+            .ok_or_else(|| format_err!("Invalid mapping '{}': expected 'url#rev=path'", mapping))?;
+
+        let local_path = Path::new(local_path);
+
+        // Compute cargo's canonical URL (strip query, fragment, trailing /, .git)
+        let parsed = url::Url::parse(url_str)
+            .map_err(|e| format_err!("Invalid URL '{}': {}", url_str, e))?;
+        let mut canonical = parsed.clone();
+        canonical.set_query(None);
+        canonical.set_fragment(None);
+        let mut path = canonical.path().trim_end_matches('/').to_string();
+        if path.ends_with(".git") {
+            path = path[..path.len() - 4].to_string();
+        }
+        canonical.set_path(&path);
+
+        // Compute SipHash-2-4(0, 0) of the canonical URL string — matches cargo's ident()
+        #[allow(deprecated)]
+        let mut hasher = SipHasher::new_with_keys(0, 0);
+        canonical.as_str().hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Get repo name from URL path
+        let name = canonical
+            .path_segments()
+            .and_then(|s| s.last())
+            .unwrap_or("repo");
+
+        let ident = format!("{}-{:016x}", name, hash);
+        let short_rev = &rev[..rev.len().min(7)];
+
+        // Create a proper git repo in db with the content, tagged at the expected rev.
+        // Cargo looks up the rev in the db repo before checking out.
+        let repo_db = db_dir.join(&ident);
+        if !repo_db.exists() {
+            std::fs::create_dir_all(&repo_db)?;
+
+            // Initialize a non-bare repo, add content, commit, then convert to bare
+            let tmp_repo = cargo_home
+                .join("git")
+                .join(format!("tmp-repo-{}", short_rev));
+            if tmp_repo.exists() {
+                // Force remove even if git made files read-only
+                std::process::Command::new("rm")
+                    .args(["-rf", &tmp_repo.to_string_lossy().to_string()])
+                    .status()?;
+            }
+            std::fs::create_dir_all(&tmp_repo)?;
+
+            let git_env = |args: &[&str], dir: &Path| -> anyhow::Result<std::process::Output> {
+                let out = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .env("GIT_AUTHOR_NAME", "Nix")
+                    .env("GIT_AUTHOR_EMAIL", "nix@localhost")
+                    .env("GIT_COMMITTER_NAME", "Nix")
+                    .env("GIT_COMMITTER_EMAIL", "nix@localhost")
+                    .output()?;
+                Ok(out)
+            };
+
+            git_env(&["init", "-q"], &tmp_repo)?;
+            // Copy source into the temp repo and make writable (nix store is read-only)
+            std::process::Command::new("cp")
+                .args([
+                    "-rT",
+                    &local_path.to_string_lossy().to_string(),
+                    &tmp_repo.to_string_lossy().to_string(),
+                ])
+                .status()?;
+            std::process::Command::new("chmod")
+                .args(["-R", "u+w", &tmp_repo.to_string_lossy().to_string()])
+                .status()?;
+            git_env(&["add", "-A"], &tmp_repo)?;
+            git_env(
+                &["commit", "-q", "-m", "nix-prefetched", "--allow-empty"],
+                &tmp_repo,
+            )?;
+            // Create a ref that cargo can resolve for the expected rev
+            git_env(
+                &["update-ref", &format!("refs/cargo/{}", rev), "HEAD"],
+                &tmp_repo,
+            )?;
+
+            // Clone as bare repo into the db location
+            std::process::Command::new("git")
+                .args(["clone", "--bare", "-q"])
+                .arg(&tmp_repo.to_string_lossy().to_string())
+                .arg(&repo_db.to_string_lossy().to_string())
+                .output()?;
+
+            // Get the actual commit hash from our repo
+            let head_output = std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&repo_db)
+                .output()?;
+            let actual_hash = String::from_utf8_lossy(&head_output.stdout)
+                .trim()
+                .to_string();
+
+            // Create a graft/replace so the expected rev resolves to our actual commit.
+            // cargo looks up the rev as a git object — use git-replace to map it.
+            if actual_hash != rev {
+                // Write a replace ref: when cargo asks for `rev`, git returns `actual_hash`
+                std::process::Command::new("git")
+                    .args(["update-ref", &format!("refs/replace/{}", rev), &actual_hash])
+                    .current_dir(&repo_db)
+                    .output()?;
+                // Also create a direct ref so `git rev-parse <rev>` works
+                std::process::Command::new("git")
+                    .args(["update-ref", &format!("refs/tags/{}", rev), &actual_hash])
+                    .current_dir(&repo_db)
+                    .output()?;
+            }
+
+            let _ = std::process::Command::new("rm")
+                .args(["-rf", &tmp_repo.to_string_lossy().to_string()])
+                .status();
+        }
+
+        // Create checkout from the pre-fetched source
+        let checkout_dir = checkouts_dir.join(&ident).join(short_rev);
+        if !checkout_dir.exists() {
+            std::fs::create_dir_all(&checkout_dir)?;
+
+            // Copy the pre-fetched source into the checkout
+            let status = std::process::Command::new("cp")
+                .args([
+                    "-rT",
+                    &local_path.to_string_lossy().to_string(),
+                    &checkout_dir.to_string_lossy().to_string(),
+                ])
+                .status()
+                .map_err(|e| format_err!("cp failed: {}", e))?;
+            if !status.success() {
+                anyhow::bail!(
+                    "Failed to copy {} to {}",
+                    local_path.display(),
+                    checkout_dir.display()
+                );
+            }
+
+            // Write .cargo-ok to mark the checkout as valid
+            std::fs::write(checkout_dir.join(".cargo-ok"), "")?;
+        }
+
+        eprintln!(
+            "Cached git dep: {} @ {} -> {}",
+            url_str,
+            short_rev,
+            checkout_dir.display()
+        );
     }
 
     Ok(())

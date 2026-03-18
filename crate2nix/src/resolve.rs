@@ -117,7 +117,9 @@ impl CrateDerivation {
         // Canonicalize the path if it exists on disk. For sandboxed builds
         // using --metadata-json, non-local crate paths (crates.io, git) won't
         // exist and that's fine — their source is fetched separately.
-        let package_path = package_path.canonicalize().unwrap_or_else(|_| package_path.into());
+        let package_path = package_path
+            .canonicalize()
+            .unwrap_or_else(|_| package_path.into());
 
         let lib = package
             .targets
@@ -342,10 +344,13 @@ pub struct BuildTarget {
 
 impl BuildTarget {
     pub fn new(target: &Target, package_path: impl AsRef<Path>) -> Result<BuildTarget, Error> {
-        let canonical_src = target.src_path.canonicalize()
+        let canonical_src = target
+            .src_path
+            .canonicalize()
             .unwrap_or_else(|_| target.src_path.clone().into());
         let package_path = package_path.as_ref();
-        let src_path = canonical_src.strip_prefix(package_path)
+        let src_path = canonical_src
+            .strip_prefix(package_path)
             .unwrap_or(&canonical_src)
             .to_path_buf();
         Ok(BuildTarget {
@@ -753,10 +758,8 @@ impl<'a> ResolvedDependencies<'a> {
             packages.push(package);
             // Store the direct mapping from node dep name to its resolved packageId.
             // node_dep.name is the rename target when renamed, or the package name otherwise.
-            node_dep_pkg_by_name.insert(
-                normalize_package_name(&node_dep.name),
-                node_dep.pkg.clone(),
-            );
+            node_dep_pkg_by_name
+                .insert(normalize_package_name(&node_dep.name), node_dep.pkg.clone());
         }
         Ok(ResolvedDependencies {
             package,

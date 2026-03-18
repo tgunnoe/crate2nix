@@ -35,6 +35,10 @@ fn self_up_to_date() {
             use_cargo_lock_checksums: true,
             read_crate_hashes: true,
             registry_hashes_json: PathBuf::from("./registry-hashes.json"),
+            metadata_json: None,
+            from_lockfile: None,
+            git_sources: vec![],
+            crates_io_manifests: None,
         },
     )
     .unwrap();
@@ -83,6 +87,10 @@ fn assert_up_to_date(project_dir: &Path) {
         registry_hashes_json: PathBuf::from("../")
             .join(project_dir)
             .join("./registry-hashes.json"),
+        metadata_json: None,
+        from_lockfile: None,
+        git_sources: vec![],
+        crates_io_manifests: None,
     };
     let metadata = BuildInfo::for_config(
         &GenerateInfo {

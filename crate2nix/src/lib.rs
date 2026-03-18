@@ -25,14 +25,15 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::metadata::IndexedMetadata;
-use serde_json;
 use crate::resolve::{CrateDerivation, ResolvedSource};
 use itertools::Itertools;
 use resolve::CratesIoSource;
+use serde_json;
 
 mod command;
 pub mod config;
 mod lock;
+pub mod lockfile_metadata;
 mod metadata;
 pub mod nix_build;
 mod prefetch;
@@ -165,8 +166,57 @@ impl BuildInfo {
     }
 }
 
-/// Call `cargo metadata` and return result, or load from a pre-generated JSON file.
+/// Call `cargo metadata` and return result, or load from a pre-generated JSON file,
+/// or build from Cargo.lock when --from-lockfile is used.
 fn cargo_metadata(config: &GenerateConfig, cargo_toml: &Path) -> Result<Metadata, Error> {
+    // --from-lockfile mode: build metadata from Cargo.lock + Cargo.toml files
+    if let Some(lockfile_path) = &config.from_lockfile {
+        let workspace_root = cargo_toml
+            .parent()
+            .ok_or_else(|| format_err!("Cargo.toml has no parent directory"))?
+            .to_path_buf();
+
+        let git_sources: Vec<lockfile_metadata::GitSourceMapping> = config
+            .git_sources
+            .iter()
+            .map(|s| lockfile_metadata::GitSourceMapping::parse(s))
+            .collect::<Result<_, _>>()?;
+
+        let lf_config = lockfile_metadata::LockfileConfig {
+            cargo_lock: lockfile_path.clone(),
+            workspace_root,
+            git_sources,
+            crates_io_manifests: config.crates_io_manifests.clone(),
+        };
+
+        let mut metadata = lockfile_metadata::build_metadata(&lf_config)
+            .context("while building metadata from Cargo.lock")?;
+
+        // Rewrite absolute paths to be relative to CWD, matching how
+        // the metadata_json path does it. This ensures generated Cargo.nix
+        // paths resolve correctly when placed in a different directory.
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let old_root = metadata.workspace_root.clone().into_std_path_buf();
+        for package in &mut metadata.packages {
+            if let Ok(rel) = package.manifest_path.strip_prefix(&old_root) {
+                package.manifest_path = cargo_metadata::camino::Utf8PathBuf::from(
+                    cwd.join(rel).to_string_lossy().to_string(),
+                );
+            }
+            for target in &mut package.targets {
+                if let Ok(rel) = target.src_path.strip_prefix(&old_root) {
+                    target.src_path = cargo_metadata::camino::Utf8PathBuf::from(
+                        cwd.join(rel).to_string_lossy().to_string(),
+                    );
+                }
+            }
+        }
+        metadata.workspace_root =
+            cargo_metadata::camino::Utf8PathBuf::from(cwd.to_string_lossy().to_string());
+
+        return Ok(metadata);
+    }
+
     if let Some(metadata_path) = &config.metadata_json {
         let json = std::fs::read_to_string(metadata_path).map_err(|e| {
             format_err!(
@@ -175,9 +225,8 @@ fn cargo_metadata(config: &GenerateConfig, cargo_toml: &Path) -> Result<Metadata
                 e
             )
         })?;
-        let mut metadata: Metadata = serde_json::from_str(&json).map_err(|e| {
-            format_err!("while parsing metadata JSON: {}", e)
-        })?;
+        let mut metadata: Metadata = serde_json::from_str(&json)
+            .map_err(|e| format_err!("while parsing metadata JSON: {}", e))?;
 
         // Rewrite absolute paths from the original machine to be relative to
         // the current working directory. The metadata JSON contains paths like
@@ -187,20 +236,19 @@ fn cargo_metadata(config: &GenerateConfig, cargo_toml: &Path) -> Result<Metadata
         for package in &mut metadata.packages {
             if let Ok(rel) = package.manifest_path.strip_prefix(&old_root) {
                 package.manifest_path = cargo_metadata::camino::Utf8PathBuf::from(
-                    cwd.join(rel).to_string_lossy().to_string()
+                    cwd.join(rel).to_string_lossy().to_string(),
                 );
             }
             for target in &mut package.targets {
                 if let Ok(rel) = target.src_path.strip_prefix(&old_root) {
                     target.src_path = cargo_metadata::camino::Utf8PathBuf::from(
-                        cwd.join(rel).to_string_lossy().to_string()
+                        cwd.join(rel).to_string_lossy().to_string(),
                     );
                 }
             }
         }
-        metadata.workspace_root = cargo_metadata::camino::Utf8PathBuf::from(
-            cwd.to_string_lossy().to_string()
-        );
+        metadata.workspace_root =
+            cargo_metadata::camino::Utf8PathBuf::from(cwd.to_string_lossy().to_string());
 
         Ok(metadata)
     } else {
@@ -367,4 +415,15 @@ pub struct GenerateConfig {
     /// If provided, cargo metadata will not be executed.
     #[serde(default)]
     pub metadata_json: Option<PathBuf>,
+    /// Optional: build metadata from Cargo.lock instead of calling cargo metadata.
+    /// This is the path to the Cargo.lock file.
+    #[serde(default)]
+    pub from_lockfile: Option<PathBuf>,
+    /// Git source mappings for --from-lockfile mode: "url#rev=local_path"
+    #[serde(default)]
+    pub git_sources: Vec<String>,
+    /// Optional path to directory with extracted crates.io Cargo.toml manifests
+    /// for --from-lockfile mode.
+    #[serde(default)]
+    pub crates_io_manifests: Option<PathBuf>,
 }

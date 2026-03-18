@@ -17,6 +17,10 @@ pub fn generate_config() -> crate::GenerateConfig {
         use_cargo_lock_checksums: true,
         read_crate_hashes: true,
         registry_hashes_json: "registry-hashes.json".into(),
+        metadata_json: None,
+        from_lockfile: None,
+        git_sources: vec![],
+        crates_io_manifests: None,
     }
 }
 
