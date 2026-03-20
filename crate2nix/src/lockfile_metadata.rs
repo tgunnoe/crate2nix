@@ -1313,6 +1313,7 @@ fn build_node_json(
                 "pkg": resolved_id,
                 "dep_kinds": dep_kind_info,
                 "_pkg_name": actual_name,
+                "_pkg_version": resolved_version,
                 "_pkg_source": resolved_source,
             }));
         } else {
@@ -1352,8 +1353,29 @@ fn build_node_json(
         let mut scores: Vec<(usize, usize, i32)> = Vec::new(); // (dep_idx, spec_idx, score)
         for &di in dep_indices {
             let dep_source = deps_json[di]["_pkg_source"].as_str().unwrap_or("");
+            let dep_version = deps_json[di]["_pkg_version"].as_str().unwrap_or("");
             for (si, (spec, _, _)) in specs_for_pkg.iter().enumerate() {
                 let mut score = 0i32;
+
+                // Version compatibility bonus (critical for disambiguating
+                // same-package deps like yamux012 vs yamux013)
+                let version_req = &spec.version_req;
+                if version_req != "*" && !dep_version.is_empty() {
+                    let version_matches = if let Some(exact) = version_req.strip_prefix('=') {
+                        dep_version == exact
+                    } else if let (Ok(req), Ok(ver)) = (
+                        semver::VersionReq::parse(version_req),
+                        semver::Version::parse(dep_version),
+                    ) {
+                        req.matches(&ver)
+                    } else {
+                        false
+                    };
+                    if version_matches {
+                        score += 200; // Version match is the strongest signal
+                    }
+                }
+
                 // Source tag match: both have similar tag keywords
                 if let Some(spec_source) = &spec.source {
                     if !dep_source.is_empty() && dep_source.starts_with(spec_source) {
@@ -1411,6 +1433,7 @@ fn build_node_json(
     for dep in &mut deps_json {
         if let Some(obj) = dep.as_object_mut() {
             obj.remove("_pkg_name");
+            obj.remove("_pkg_version");
             obj.remove("_pkg_source");
         }
     }
