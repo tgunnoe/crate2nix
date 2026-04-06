@@ -146,7 +146,7 @@ pub fn build_metadata(config: &LockfileConfig) -> Result<Metadata, Error> {
         // search the workspace root for their Cargo.toml.
         // These are typically sub-crates of workspace members.
         if member_path.is_none() && lock_pkg.source.is_none() {
-            if let Some(found) = find_manifest_recursive(&config.workspace_root, &lock_pkg.name, 5)
+            if let Some(found) = find_manifest_recursive(&config.workspace_root, &lock_pkg.name, 8)
             {
                 member_path = found.parent().map(|p| p.to_path_buf());
             }
