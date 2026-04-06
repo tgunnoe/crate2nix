@@ -1037,11 +1037,10 @@ fn build_package_json(
     let manifest_path = if let Some(path) = member_path {
         path.join("Cargo.toml")
     } else {
-        // For non-workspace members (git/registry deps), use a synthetic manifest path.
-        // This path is only used for metadata structure (edition, targets, etc.) —
-        // the actual source comes from fetchgit/fetchurl. Use a path that won't be
-        // under the workspace root, so it doesn't get CWD-rewritten to a nix store path.
-        PathBuf::from("__crate2nix_external__")
+        // For non-workspace members, use a synthetic path
+        workspace_root
+            .join("target")
+            .join("lockfile-metadata")
             .join(&lock_pkg.name)
             .join(&lock_pkg.version)
             .join("Cargo.toml")
